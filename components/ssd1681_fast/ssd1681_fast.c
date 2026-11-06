@@ -140,7 +140,10 @@ static esp_err_t transfer(struct ssd1681_device *d, bool data,
     /* IDF retains the override. Pay its setup cost only when changing mode. */
     if (hz != d->active_spi_hz) tx.override_freq_hz = hz;
     ssd1681_bus_lock();
-    esp_err_t err = spi_device_polling_transmit(d->spi, &tx);
+    /* Frame uploads take milliseconds: interrupt-driven, so other tasks get the CPU.
+     * Commands and register bytes stay polled, which is quicker for a few bytes. */
+    esp_err_t err = length > 64 ? spi_device_transmit(d->spi, &tx)
+                                : spi_device_polling_transmit(d->spi, &tx);
     ssd1681_bus_unlock();
     if (err == ESP_OK) d->active_spi_hz = hz;
     if (err != ESP_OK) d->fault = true;
