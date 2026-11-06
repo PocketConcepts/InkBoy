@@ -23,12 +23,57 @@ enum {
     CMD_VENDOR_GATE = 0x03, CMD_VENDOR_SOURCE = 0x04, CMD_VENDOR_VCOM = 0x2c,
     CMD_VENDOR_PARTIAL = 0x37, CMD_VENDOR_END = 0x3f,
 };
-/* Pins of the Waveshare ESP32-S3-ePaper-1.54 V2; PIN_PWR drives the active-low AO3401 panel supply switch. */
-enum { PIN_PWR = 6, PIN_BUSY = 8, PIN_RST = 9, PIN_DC = 10,
-       PIN_CS = 11, PIN_CLK = 12, PIN_MOSI = 13 };
+/* Pins of the Waveshare ESP32-S3-ePaper-1.54 V2; PIN_PWR drives the active-low AO3401 panel supply switch.
+ * Other boards override them with -DSSD1681_PIN_xxx=n; SSD1681_PIN_PWR=-1 means no supply switch. */
+#ifndef SSD1681_PIN_PWR
+#define SSD1681_PIN_PWR 6
+#endif
+#ifndef SSD1681_PIN_BUSY
+#define SSD1681_PIN_BUSY 8
+#endif
+#ifndef SSD1681_PIN_RST
+#define SSD1681_PIN_RST 9
+#endif
+#ifndef SSD1681_PIN_DC
+#define SSD1681_PIN_DC 10
+#endif
+#ifndef SSD1681_PIN_CS
+#define SSD1681_PIN_CS 11
+#endif
+#ifndef SSD1681_PIN_CLK
+#define SSD1681_PIN_CLK 12
+#endif
+#ifndef SSD1681_PIN_MOSI
+#define SSD1681_PIN_MOSI 13
+#endif
+#ifndef SSD1681_SPI_HOST
+#define SSD1681_SPI_HOST SPI2_HOST
+#endif
+/* SSD1681_SHARED_SPI_BUS=1: the application owns an initialized bus shared with other devices. The
+ * driver then only adds its device, never frees the bus and never touches CLK/MOSI, and wraps each
+ * transfer in ssd1681_bus_lock()/ssd1681_bus_unlock(), which the application may override. */
+#ifndef SSD1681_SHARED_SPI_BUS
+#define SSD1681_SHARED_SPI_BUS 0
+#endif
+enum { PIN_PWR = SSD1681_PIN_PWR, PIN_BUSY = SSD1681_PIN_BUSY, PIN_RST = SSD1681_PIN_RST,
+       PIN_DC = SSD1681_PIN_DC, PIN_CS = SSD1681_PIN_CS, PIN_CLK = SSD1681_PIN_CLK,
+       PIN_MOSI = SSD1681_PIN_MOSI };
 #define BUSY_TIMEOUT_MS 10000
 static const char *TAG = "ssd1681";
+#if SSD1681_SHARED_SPI_BUS
+static const gpio_num_t signal_pins[] = {PIN_RST, PIN_DC, PIN_CS};
+#else
 static const gpio_num_t signal_pins[] = {PIN_RST, PIN_DC, PIN_CS, PIN_CLK, PIN_MOSI};
+#endif
+
+__attribute__((weak)) void ssd1681_bus_lock(void) {}
+__attribute__((weak)) void ssd1681_bus_unlock(void) {}
+
+static esp_err_t set_panel_power(bool on)
+{
+    if (PIN_PWR < 0) return ESP_OK;
+    return gpio_set_level(PIN_PWR, on ? 0 : 1);
+}
 
 struct ssd1681_device {
     spi_device_handle_t spi;
@@ -94,7 +139,9 @@ static esp_err_t transfer(struct ssd1681_device *d, bool data,
     const unsigned hz = d->fast_transport ? 20000000 : SSD1681_SPI_HZ;
     /* IDF retains the override. Pay its setup cost only when changing mode. */
     if (hz != d->active_spi_hz) tx.override_freq_hz = hz;
+    ssd1681_bus_lock();
     esp_err_t err = spi_device_polling_transmit(d->spi, &tx);
+    ssd1681_bus_unlock();
     if (err == ESP_OK) d->active_spi_hz = hz;
     if (err != ESP_OK) d->fault = true;
     return err;
@@ -199,19 +246,22 @@ static esp_err_t frame_window(struct ssd1681_device *d)
 
 static esp_err_t spi_open(struct ssd1681_device *d)
 {
+    esp_err_t err;
+#if !SSD1681_SHARED_SPI_BUS
     spi_bus_config_t bus = {
         .mosi_io_num = PIN_MOSI, .miso_io_num = -1, .sclk_io_num = PIN_CLK,
         .quadwp_io_num = -1, .quadhd_io_num = -1,
         .max_transfer_sz = SSD1681_FRAME_BYTES,
     };
-    esp_err_t err = spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO);
+    err = spi_bus_initialize(SSD1681_SPI_HOST, &bus, SPI_DMA_CH_AUTO);
     if (err != ESP_OK) return err;
     d->bus_created = true;
+#endif
     spi_device_interface_config_t device = {
         .clock_speed_hz = SSD1681_SPI_HZ, .mode = 0,
         .spics_io_num = PIN_CS, .queue_size = 1,
     };
-    err = spi_bus_add_device(SPI2_HOST, &device, &d->spi);
+    err = spi_bus_add_device(SSD1681_SPI_HOST, &device, &d->spi);
     if (err != ESP_OK) return err;
     d->active_spi_hz = SSD1681_SPI_HZ;
     return ESP_OK;
@@ -227,13 +277,15 @@ esp_err_t ssd1681_create(ssd1681_handle_t *out)
     d->completion = xSemaphoreCreateBinary();
     esp_err_t err = d->completion ? ESP_OK : ESP_ERR_NO_MEM;
     if (err != ESP_OK) goto fail;
-    /* Preload OFF before enabling the active-low power output. */
-    err = gpio_set_level(PIN_PWR, 1);
-    if (err != ESP_OK) goto fail;
-    gpio_config_t pins = {.pin_bit_mask = 1ULL << PIN_PWR,
-                          .mode = GPIO_MODE_OUTPUT};
-    err = gpio_config(&pins);
-    if (err != ESP_OK) goto fail;
+    gpio_config_t pins = {.mode = GPIO_MODE_OUTPUT};
+    if (PIN_PWR >= 0) {
+        /* Preload OFF before enabling the active-low power output. */
+        err = set_panel_power(false);
+        if (err != ESP_OK) goto fail;
+        pins.pin_bit_mask = 1ULL << PIN_PWR;
+        err = gpio_config(&pins);
+        if (err != ESP_OK) goto fail;
+    }
     pins.pin_bit_mask = (1ULL << PIN_RST) | (1ULL << PIN_DC);
     err = gpio_config(&pins);
     if (err != ESP_OK) goto fail;
@@ -243,8 +295,10 @@ esp_err_t ssd1681_create(ssd1681_handle_t *out)
     err = gpio_config(&pins);
     if (err != ESP_OK) goto fail;
     err = gpio_install_isr_service(0);
+    /* Another driver may already run the service; then it isn't ours to uninstall. */
+    if (err == ESP_ERR_INVALID_STATE) err = ESP_OK;
+    else if (err == ESP_OK) d->isr_service = true;
     if (err != ESP_OK) goto fail;
-    d->isr_service = true;
     err = gpio_isr_handler_add(PIN_BUSY, busy_isr, d);
     if (err != ESP_OK) goto fail;
     d->isr_handler = true;
@@ -274,7 +328,7 @@ esp_err_t ssd1681_power_on(ssd1681_handle_t d)
     heap_caps_free(d->gray_wave_planes);d->gray_wave_planes=NULL;
     d->fast_transport = false;
     d->vendor_skip_hold_frame = false;
-    ESP_RETURN_ON_ERROR(gpio_set_level(PIN_PWR, 0), TAG, "power on");
+    ESP_RETURN_ON_ERROR(set_panel_power(true), TAG, "power on");
     d->powered = true;
     vTaskDelay(pdMS_TO_TICKS(10));
     /* IDF 6.1 gpio_set_direction(OUTPUT) disconnects peripheral routing, so only GPIO controls are set
@@ -676,7 +730,7 @@ esp_err_t ssd1681_power_off(ssd1681_handle_t d)
         if (result == ESP_OK) result = err;
     }
     if (d->bus_created && !d->spi) {
-        esp_err_t err = spi_bus_free(SPI2_HOST);
+        esp_err_t err = spi_bus_free(SSD1681_SPI_HOST);
         if (err == ESP_OK) d->bus_created = false;
         if (result == ESP_OK) result = err;
     }
@@ -685,7 +739,7 @@ esp_err_t ssd1681_power_off(ssd1681_handle_t d)
         esp_err_t err = gpio_set_direction(signal_pins[i], GPIO_MODE_INPUT);
         if (result == ESP_OK) result = err;
     }
-    esp_err_t err = gpio_set_level(PIN_PWR, 1);
+    esp_err_t err = set_panel_power(false);
     if (result == ESP_OK) result = err;
     d->powered = d->analog_on = d->full_done = false;
     d->vendor_profile = d->vendor_partial = false;
@@ -712,7 +766,7 @@ esp_err_t ssd1681_destroy(ssd1681_handle_t d)
         if (result == ESP_OK) result = err;
     }
     if (d->bus_created) {
-        esp_err_t err = spi_bus_free(SPI2_HOST);
+        esp_err_t err = spi_bus_free(SSD1681_SPI_HOST);
         if (result == ESP_OK) result = err;
     }
     if (d->completion) vSemaphoreDelete(d->completion);
