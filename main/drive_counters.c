@@ -20,7 +20,7 @@ unsigned drive_counters_prepare(drive_counters_t *c, const uint8_t *target,
         memcpy(&next, target + i * sizeof(next), sizeof(next));
         const uint32_t changed = next ^ c->target[i];
         uint32_t active = 0;
-        for (unsigned plane = 0; plane < 4; ++plane) {
+        for (unsigned plane = 0; plane < DRIVE_PLANES; ++plane) {
             uint32_t value = c->count[plane][i];
             if (changed) {
                 const uint32_t budget = ((black_pulses & (1u << plane)) ? ~next : 0) |
@@ -48,11 +48,11 @@ void drive_counters_complete(drive_counters_t *c, const uint8_t *black, const ui
         memcpy(&b, black + i * sizeof(b), sizeof(b));
         memcpy(&w, white + i * sizeof(w), sizeof(w));
         uint32_t active = 0;
-        for (unsigned plane = 0; plane < 4; ++plane) active |= c->count[plane][i];
-        /* Subtract only from delivered, matching counters; an inactive pixel would wrap from 0 to 15. */
+        for (unsigned plane = 0; plane < DRIVE_PLANES; ++plane) active |= c->count[plane][i];
+        /* Subtract only from delivered, matching counters; an inactive pixel would wrap from 0 to the maximum. */
         uint32_t borrow = active & ((b & ~c->target[i]) | (w & c->target[i]));
         active = 0;
-        for (unsigned plane = 0; plane < 4; ++plane) {
+        for (unsigned plane = 0; plane < DRIVE_PLANES; ++plane) {
             uint32_t old = c->count[plane][i];
             c->count[plane][i] = old ^ borrow;
             borrow &= ~old;

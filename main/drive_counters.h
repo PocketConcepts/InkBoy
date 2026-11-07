@@ -1,11 +1,15 @@
 #pragma once
 #include "ssd1681_fast.h"
 
-/* Four bit planes count 0..8 independently for 32 pixels at once.
- * Internal SRAM: 25 KB, including the actual target image. */
+/* DRIVE_PLANES bit planes count pulses (up to 2^planes - 1) independently for 32
+ * pixels at once. Four planes: internal SRAM 25 KB, including the target image;
+ * each extra plane adds 5 KB. */
+#ifndef DRIVE_PLANES
+#define DRIVE_PLANES 4
+#endif
 #define DRIVE_WORDS (SSD1681_FRAME_BYTES / sizeof(uint32_t))
 typedef struct {
-    uint32_t target[DRIVE_WORDS], count[4][DRIVE_WORDS];
+    uint32_t target[DRIVE_WORDS], count[DRIVE_PLANES][DRIVE_WORDS];
     unsigned pending_pixels;
 } drive_counters_t;
 
